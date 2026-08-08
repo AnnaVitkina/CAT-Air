@@ -24,7 +24,7 @@ _COLAB_CODE_DIRS = (
 
 COLAB_DRIVE_BASE = Path(
     "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
-    "/Documents/AI Adoption RMT/RMT Caterpillar/Air"
+    "/Documents/AI Adoption RMT/RMT_CAT/Air"
 )
 
 
