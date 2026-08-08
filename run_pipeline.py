@@ -16,7 +16,12 @@ Usage (Google Colab):
     drive.mount("/content/drive")
     exec(open("/content/CAT-Air/run_pipeline.py").read())
 
-  # Optional environment overrides:
+  Data is read from Google Drive automatically when this folder exists:
+    .../RMT Caterpillar/Air/input
+    .../RMT Caterpillar/Air/processing
+    .../RMT Caterpillar/Air/output
+
+  # Optional overrides:
   # os.environ["CAT_AIR_DRIVE_BASE"] = "/content/drive/.../RMT Caterpillar/Air"
   # os.environ["CAT_AIR_AUTO"] = "1"
 """
