@@ -22,6 +22,11 @@ _COLAB_CODE_DIRS = (
     Path("/content/CAT-air"),
 )
 
+COLAB_DRIVE_BASE = Path(
+    "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
+    "/Documents/AI Adoption RMT/RMT Caterpillar/Air"
+)
+
 
 def _resolve_script_dir() -> Path:
     try:
@@ -34,18 +39,16 @@ def _resolve_script_dir() -> Path:
     return Path.cwd()
 
 
+def _is_colab_runtime() -> bool:
+    return Path("/content").is_dir() and any(path.is_dir() for path in _COLAB_CODE_DIRS)
+
+
 _SCRIPT_DIR = _resolve_script_dir()
 BASE_DIR = next((path for path in _COLAB_CODE_DIRS if path.is_dir()), _SCRIPT_DIR)
-
 ROOT = BASE_DIR
 INPUT_DIR = ROOT / "input"
 PROCESSING_DIR = ROOT / "processing"
 OUTPUT_DIR = ROOT / "output"
-
-COLAB_DRIVE_BASE = Path(
-    "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
-    "/Documents/AI Adoption RMT/RMT Caterpillar/Air"
-)
 
 
 def _path_from_env(name: str) -> Path | None:
@@ -55,7 +58,7 @@ def _path_from_env(name: str) -> Path | None:
     return Path(value).expanduser()
 
 
-def _colab_drive_base() -> Path | None:
+def _drive_data_root() -> Path | None:
     candidates: list[Path] = []
     env_base = _path_from_env("CAT_AIR_DRIVE_BASE")
     if env_base is not None:
@@ -63,9 +66,42 @@ def _colab_drive_base() -> Path | None:
     candidates.append(COLAB_DRIVE_BASE)
 
     for candidate in candidates:
-        if (candidate / "input").is_dir() or (candidate / "processing").is_dir():
+        if candidate.is_dir():
             return candidate
     return None
+
+
+def _apply_default_data_paths() -> None:
+    """Point data folders to Google Drive in Colab when the Drive root exists."""
+    global INPUT_DIR, PROCESSING_DIR, OUTPUT_DIR, ROOT
+
+    code_root = _path_from_env("CAT_AIR_CODE_DIR")
+    ROOT = code_root.expanduser().resolve() if code_root is not None else BASE_DIR
+
+    input_dir = _path_from_env("CAT_AIR_INPUT_DIR")
+    processing_dir = _path_from_env("CAT_AIR_PROCESSING_DIR")
+    output_dir = _path_from_env("CAT_AIR_OUTPUT_DIR")
+
+    if input_dir is None and processing_dir is None and output_dir is None:
+        drive_root = _drive_data_root()
+        if drive_root is not None and _is_colab_runtime():
+            input_dir = drive_root / "input"
+            processing_dir = drive_root / "processing"
+            output_dir = drive_root / "output"
+
+    if input_dir is None:
+        input_dir = BASE_DIR / "input"
+    if processing_dir is None:
+        processing_dir = BASE_DIR / "processing"
+    if output_dir is None:
+        output_dir = BASE_DIR / "output"
+
+    INPUT_DIR = input_dir.expanduser().resolve()
+    PROCESSING_DIR = processing_dir.expanduser().resolve()
+    OUTPUT_DIR = output_dir.expanduser().resolve()
+
+
+_apply_default_data_paths()
 
 
 def configure_paths(
@@ -89,33 +125,8 @@ def configure_paths(
 
 
 def configure_paths_from_env() -> None:
-    """Apply CAT_AIR_* environment variables and Colab Drive defaults when available."""
-    global ROOT
-
-    code_root = _path_from_env("CAT_AIR_CODE_DIR")
-    if code_root is not None:
-        ROOT = code_root.expanduser().resolve()
-    else:
-        ROOT = BASE_DIR
-
-    input_dir = _path_from_env("CAT_AIR_INPUT_DIR")
-    processing_dir = _path_from_env("CAT_AIR_PROCESSING_DIR")
-    output_dir = _path_from_env("CAT_AIR_OUTPUT_DIR")
-
-    if input_dir is None and processing_dir is None and output_dir is None:
-        drive_base = _colab_drive_base()
-        if drive_base is not None:
-            input_dir = drive_base / "input"
-            processing_dir = drive_base / "processing"
-            output_dir = drive_base / "output"
-
-    if any(path is not None for path in (input_dir, processing_dir, output_dir)):
-        configure_paths(
-            root=ROOT,
-            input_dir=input_dir or INPUT_DIR,
-            processing_dir=processing_dir or PROCESSING_DIR,
-            output_dir=output_dir or OUTPUT_DIR,
-        )
+    """Re-apply CAT_AIR_* environment variables and Colab Drive defaults."""
+    _apply_default_data_paths()
 
 
 def ensure_workspace_dirs() -> None:
