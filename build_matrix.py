@@ -33,6 +33,12 @@ from number_utils import (
     normalize_numeric_columns,
     normalize_numeric_value,
 )
+from export_origin_postal_code_zones import (
+    OriginPostalCodeZoneExportResult,
+    OriginPostalCodeZoneResolver,
+    default_postal_zones_path,
+    export_origin_postal_code_zones,
+)
 from project_paths import OUTPUT_DIR, PROCESSING_DIR, ensure_workspace_dirs
 
 DEFAULT_SHEET_NAME = "AIR_RATES_ENRICHED"
@@ -59,6 +65,7 @@ PRICE_NUMBER_FORMAT = EXCEL_NUMBER_FORMAT
 BOLD_SHIPMENT_HEADERS = {
     "Commodity",
     "Origin Port",
+    "Origin Postal Code Zone",
     "Origin Postal Code",
     "Origin Country",
 }
@@ -98,6 +105,7 @@ class MatrixBuildResult:
     shipment_column_count: int
     cost_block_count: int
     accessorial: AccessorialBuildResult | None = None
+    postal_zones: OriginPostalCodeZoneExportResult | None = None
 
 
 SHIPMENT_COLUMNS: tuple[ShipmentColumn, ...] = (
@@ -106,6 +114,11 @@ SHIPMENT_COLUMNS: tuple[ShipmentColumn, ...] = (
     ShipmentColumn("Commodity", source_column="COMMODITY", bold_header=True),
     ShipmentColumn("ORIGIN_LOCATION_NAME", source_column="ORIGIN_LOCATION_NAME__C"),
     ShipmentColumn("Origin Port", value_fn="empty", bold_header=True),
+    ShipmentColumn(
+        "Origin Postal Code Zone",
+        value_fn="origin_postal_code_zone",
+        bold_header=True,
+    ),
     ShipmentColumn(
         "Origin Postal Code",
         source_column="ORIGIN_LOCATION_NAME__C",
@@ -203,6 +216,7 @@ def _shipment_value(
     column: ShipmentColumn,
     *,
     lane_number: int,
+    zone_resolver: OriginPostalCodeZoneResolver | None = None,
 ) -> object:
     if column.value_fn == "lane_number":
         return lane_number
@@ -211,6 +225,10 @@ def _shipment_value(
     if column.value_fn == "trim_country_prefix":
         source = column.source_column or ""
         return trim_country_prefix(row.get(source))
+    if column.value_fn == "origin_postal_code_zone":
+        if zone_resolver is None:
+            return None
+        return zone_resolver.resolve(row.name)
     if column.value_fn == "date_dd_mm_yyyy":
         source = column.source_column or ""
         return format_date_dd_mm_yyyy(row.get(source))
@@ -291,6 +309,8 @@ def _build_matrix_rows(
     rate_card: pd.DataFrame,
     shipment_columns: tuple[ShipmentColumn, ...],
     cost_blocks: list[CostBlock],
+    *,
+    zone_resolver: OriginPostalCodeZoneResolver,
 ) -> list[list[object]]:
     shipment_headers = [column.header for column in shipment_columns]
     expanded_cost_columns = [
@@ -324,7 +344,12 @@ def _build_matrix_rows(
         data_row: list[object] = []
         for column in shipment_columns:
             data_row.append(
-                _shipment_value(row, column, lane_number=lane_number)
+                _shipment_value(
+                    row,
+                    column,
+                    lane_number=lane_number,
+                    zone_resolver=zone_resolver,
+                )
             )
 
         for block, (_, source_column, _, is_currency) in [
@@ -453,7 +478,13 @@ def build_matrix_from_rate_card(
     if not cost_blocks:
         raise ValueError("No cost blocks with data found in rate card.")
 
-    matrix_rows = _build_matrix_rows(rate_card, SHIPMENT_COLUMNS, cost_blocks)
+    zone_resolver = OriginPostalCodeZoneResolver(rate_card)
+    matrix_rows = _build_matrix_rows(
+        rate_card,
+        SHIPMENT_COLUMNS,
+        cost_blocks,
+        zone_resolver=zone_resolver,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
@@ -490,12 +521,19 @@ def build_matrix_from_rate_card(
 
     workbook.save(output_path)
 
+    postal_zones_result = export_origin_postal_code_zones(
+        rate_card,
+        default_postal_zones_path(output_path),
+        resolver=zone_resolver,
+    )
+
     return MatrixBuildResult(
         matrix_path=output_path,
         row_count=len(rate_card),
         shipment_column_count=len(SHIPMENT_COLUMNS),
         cost_block_count=len(cost_blocks),
         accessorial=accessorial_result,
+        postal_zones=postal_zones_result,
     )
 
 
@@ -574,6 +612,11 @@ def run_build_matrix(
         print(
             f"  Accessorial tab '{result.accessorial.sheet_name}': "
             f"{result.accessorial.row_count} rows"
+        )
+    if result.postal_zones is not None:
+        print(
+            f"  Origin postal zones: {result.postal_zones.output_path} "
+            f"({result.postal_zones.zone_count} zones)"
         )
     return result
 
