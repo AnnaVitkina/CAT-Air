@@ -60,6 +60,7 @@ _PIPELINE_MODULES = (
     "number_utils",
     "convert_to_processing",
     "build_accessorial_costs",
+    "export_origin_postal_code_zones",
     "build_matrix",
 )
 
@@ -150,6 +151,11 @@ def run_pipeline(
             print(
                 f"    Accessorial tab:   {matrix.accessorial.sheet_name} "
                 f"({matrix.accessorial.row_count} rows)"
+            )
+        if matrix.postal_zones is not None:
+            print(
+                f"    Postal zones txt:  {matrix.postal_zones.output_path} "
+                f"({matrix.postal_zones.zone_count} zones)"
             )
 
     return PipelineResult(conversion=conversion, matrix=matrix)
