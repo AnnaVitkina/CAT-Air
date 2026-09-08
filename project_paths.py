@@ -47,6 +47,9 @@ _SCRIPT_DIR = _resolve_script_dir()
 BASE_DIR = next((path for path in _COLAB_CODE_DIRS if path.is_dir()), _SCRIPT_DIR)
 ROOT = BASE_DIR
 INPUT_DIR = ROOT / "input"
+PREVIOUS_RA_DIR = INPUT_DIR / "previous RA"
+UPDATE_DIR = INPUT_DIR / "update"
+PERIODICAL_DIR = INPUT_DIR / "periodical"
 PROCESSING_DIR = ROOT / "processing"
 OUTPUT_DIR = ROOT / "output"
 
@@ -131,6 +134,9 @@ def configure_paths_from_env() -> None:
 
 def ensure_workspace_dirs() -> None:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIOUS_RA_DIR.mkdir(parents=True, exist_ok=True)
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    PERIODICAL_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSING_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -140,6 +146,9 @@ def print_path_config() -> None:
     print(f"  Code:       {BASE_DIR}")
     print(f"  Root:       {ROOT}")
     print(f"  Input:      {INPUT_DIR}")
+    print(f"  Previous RA:{PREVIOUS_RA_DIR}")
+    print(f"  Update:     {UPDATE_DIR}")
+    print(f"  Periodical: {PERIODICAL_DIR}")
     print(f"  Processing: {PROCESSING_DIR}")
     print(f"  Output:     {OUTPUT_DIR}")
     if INPUT_DIR != BASE_DIR / "input":
