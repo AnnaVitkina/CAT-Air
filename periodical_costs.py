@@ -351,6 +351,7 @@ def apply_periodical_costs(
                 sample_entry.valid_to,
             ),
             display_base_name=sample_entry.kind.display_base_name,
+            valid_from=sample_entry.valid_from,
         )
 
     for entry in entries:
