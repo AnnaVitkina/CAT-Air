@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -61,6 +62,7 @@ class MatrixWorkbookData:
     header_rows: list[list[object]]
     lanes: list[MatrixLane]
     extra_sheets: dict[str, pd.DataFrame] = field(default_factory=dict)
+    column_insertions: list[tuple[int, int]] = field(default_factory=list)
     header_row: int = COLUMN_HEADER_ROW
     data_start_row: int = DATA_START_ROW
 
@@ -479,28 +481,87 @@ def find_cost_block_columns(
     return [column for column in columns if column.cost_name == cost_name]
 
 
-def _reindex_matrix_columns(matrix: MatrixWorkbookData) -> None:
-    matrix.columns = [
-        MatrixColumn(index=index, header=column.header, cost_name=column.cost_name)
-        for index, column in enumerate(matrix.columns)
+PERIODICAL_VALIDITY_PATTERN = re.compile(
+    r"^(.+?) \((\d{2}\.\d{2}\.\d{4})-(\d{2}\.\d{2}\.\d{4})\)$"
+)
+
+
+def parse_periodical_cost_validity(cost_name: str) -> tuple[str, date, date] | None:
+    match = PERIODICAL_VALIDITY_PATTERN.match(cost_name.strip())
+    if not match:
+        return None
+    valid_from = parse_date_dd_mm_yyyy(match.group(2))
+    valid_to = parse_date_dd_mm_yyyy(match.group(3))
+    if valid_from is None or valid_to is None:
+        return None
+    return match.group(1), valid_from, valid_to
+
+
+def _first_column_index_for_cost_block(
+    columns: list[MatrixColumn],
+    cost_name: str,
+) -> int | None:
+    indices = [column.index for column in columns if column.cost_name == cost_name]
+    return min(indices) if indices else None
+
+
+def _last_column_index_for_cost_prefix(
+    columns: list[MatrixColumn],
+    display_base_name: str,
+) -> int | None:
+    prefix = display_base_name.lower()
+    indices = [
+        column.index
+        for column in columns
+        if column.cost_name and column.cost_name.lower().startswith(prefix)
     ]
+    return max(indices) if indices else None
 
 
 def find_insert_position_for_periodical_block(
     columns: list[MatrixColumn],
     after_anchor: str,
     display_base_name: str,
+    *,
+    valid_from: date,
 ) -> int:
     anchor_end = find_last_column_of_cost_block(columns, after_anchor)
     if anchor_end is None:
         raise ValueError(f"Could not find cost block '{after_anchor}' to insert after.")
 
-    insert_pos = anchor_end
     prefix = display_base_name.lower()
+    existing_blocks: list[tuple[date, int]] = []
+    seen_names: set[str] = set()
     for column in columns:
-        if column.cost_name and column.cost_name.lower().startswith(prefix):
-            insert_pos = max(insert_pos, column.index)
-    return insert_pos + 1
+        if not column.cost_name or not column.cost_name.lower().startswith(prefix):
+            continue
+        if column.cost_name in seen_names:
+            continue
+        seen_names.add(column.cost_name)
+        parsed = parse_periodical_cost_validity(column.cost_name)
+        block_start = _first_column_index_for_cost_block(columns, column.cost_name)
+        if parsed is not None and block_start is not None:
+            existing_blocks.append((parsed[1], block_start))
+
+    if not existing_blocks:
+        return anchor_end + 1
+
+    existing_blocks.sort(key=lambda item: item[1])
+    for existing_from, start_index in existing_blocks:
+        if valid_from > existing_from:
+            return start_index
+
+    last_index = _last_column_index_for_cost_prefix(columns, display_base_name)
+    if last_index is None:
+        return anchor_end + 1
+    return last_index + 1
+
+
+def _reindex_matrix_columns(matrix: MatrixWorkbookData) -> None:
+    matrix.columns = [
+        MatrixColumn(index=index, header=column.header, cost_name=column.cost_name)
+        for index, column in enumerate(matrix.columns)
+    ]
 
 
 def insert_cost_block_after(
@@ -511,16 +572,25 @@ def insert_cost_block_after(
     header_cells_by_row: list[list[object]],
     *,
     display_base_name: str | None = None,
+    valid_from: date | None = None,
 ) -> list[int]:
     existing = find_cost_block_columns(matrix.columns, cost_name)
     if existing:
         return [column.index for column in existing]
 
-    if display_base_name is not None:
+    if display_base_name is not None and valid_from is not None:
         insert_pos = find_insert_position_for_periodical_block(
             matrix.columns,
             after_anchor,
             display_base_name,
+            valid_from=valid_from,
+        )
+    elif display_base_name is not None:
+        insert_pos = find_insert_position_for_periodical_block(
+            matrix.columns,
+            after_anchor,
+            display_base_name,
+            valid_from=date.min,
         )
     else:
         anchor_end = find_last_column_of_cost_block(matrix.columns, after_anchor)
@@ -528,6 +598,7 @@ def insert_cost_block_after(
             raise ValueError(f"Could not find cost block '{after_anchor}' to insert after.")
         insert_pos = anchor_end + 1
     added_indices: list[int] = []
+    matrix.column_insertions.append((insert_pos, len(sub_headers)))
 
     for offset, sub_header in enumerate(sub_headers):
         matrix.columns.insert(
@@ -570,6 +641,84 @@ def _discover_cost_blocks_from_columns(columns: list[MatrixColumn]) -> list[tupl
     if current_name is not None:
         blocks.append((current_name, current_columns))
     return blocks
+
+
+def _unmerge_rate_card_cost_headers(worksheet, matrix: MatrixWorkbookData) -> None:
+    shipment_column_count = _shipment_column_count(matrix.columns)
+    header_row = matrix.header_row
+    ranges_to_remove = []
+    for merged_range in list(worksheet.merged_cells.ranges):
+        if merged_range.min_row > header_row:
+            continue
+        if merged_range.max_col <= shipment_column_count:
+            continue
+        ranges_to_remove.append(merged_range)
+    for merged_range in ranges_to_remove:
+        worksheet.unmerge_cells(str(merged_range))
+
+
+def _merge_rate_card_cost_blocks(worksheet, matrix: MatrixWorkbookData) -> None:
+    shipment_column_count = _shipment_column_count(matrix.columns)
+    cost_blocks = _discover_cost_blocks_from_columns(matrix.columns)
+    header_row = matrix.header_row
+    merge_rows = tuple(range(header_row - 4, header_row - 1))
+    current_column = shipment_column_count + 1
+
+    for _, block_columns in cost_blocks:
+        block_width = len(block_columns)
+        if block_width > 1:
+            for merge_row in merge_rows:
+                worksheet.merge_cells(
+                    start_row=merge_row,
+                    start_column=current_column,
+                    end_row=merge_row,
+                    end_column=current_column + block_width - 1,
+                )
+        current_column += block_width
+
+
+def _write_rate_card_header_rows(
+    worksheet,
+    matrix: MatrixWorkbookData,
+    *,
+    changed_cells: set[tuple[int, int]],
+) -> None:
+    total_columns = len(matrix.columns)
+    header_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    shipment_column_count = _shipment_column_count(matrix.columns)
+    header_row = matrix.header_row
+    bold_shipment_headers = {
+        column.header
+        for column in SHIPMENT_COLUMNS
+        if column.bold_header
+    }
+
+    for row_offset, header_row_values in enumerate(matrix.header_rows):
+        row_index = row_offset + 1
+        for column_index in range(total_columns):
+            value = header_row_values[column_index] if column_index < len(header_row_values) else None
+            cell = worksheet.cell(row=row_index, column=column_index + 1, value=value)
+            if value == "":
+                cell.value = None
+            if (row_index, column_index + 1) in changed_cells:
+                cell.fill = _updated_fill()
+            elif row_index == header_row - 4 and column_index + 1 > shipment_column_count:
+                cell.fill = HEADER_FILL
+                cell.font = HEADER_FONT
+                cell.alignment = header_center
+            elif row_index == header_row - 2:
+                cell.alignment = center
+            elif row_index == header_row:
+                if (row_index, column_index + 1) not in changed_cells:
+                    cell.fill = SUBHEADER_FILL
+                header_font = SUBHEADER_FONT
+                if column_index < shipment_column_count:
+                    column = matrix.columns[column_index]
+                    if column.header in bold_shipment_headers:
+                        header_font = BOLD_FONT
+                cell.font = header_font
+                cell.alignment = center
 
 
 def _apply_worksheet_formatting(
@@ -683,10 +832,20 @@ def _write_rate_card_sheet_inplace(
 ) -> None:
     changed = changed_cells or set()
     highlighted_rows = updated_rows or set()
-    total_columns = len(matrix.columns)
+    write_columns = len(matrix.columns)
+
+    if matrix.column_insertions:
+        _unmerge_rate_card_cost_headers(worksheet, matrix)
+        for insert_pos, count in reversed(matrix.column_insertions):
+            worksheet.insert_cols(insert_pos + 1, count)
+        _write_rate_card_header_rows(worksheet, matrix, changed_cells=changed)
+        _merge_rate_card_cost_blocks(worksheet, matrix)
+    else:
+        _unmerge_rate_card_cost_headers(worksheet, matrix)
+        _write_rate_card_header_rows(worksheet, matrix, changed_cells=changed)
+        _merge_rate_card_cost_blocks(worksheet, matrix)
 
     first_clear_row = matrix.data_start_row + len(matrix.lanes)
-    write_columns = len(matrix.columns)
 
     for lane_offset, lane in enumerate(matrix.lanes):
         row_index = matrix.data_start_row + lane_offset
