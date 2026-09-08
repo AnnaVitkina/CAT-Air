@@ -33,7 +33,7 @@ from number_utils import (
     normalize_numeric_columns,
     normalize_numeric_value,
 )
-from export_origin_postal_code_zones import (
+from export_origin_posta_code_zones import (
     OriginPostalCodeZoneExportResult,
     OriginPostalCodeZoneResolver,
     default_postal_zones_path,
@@ -42,6 +42,7 @@ from export_origin_postal_code_zones import (
 from project_paths import OUTPUT_DIR, PROCESSING_DIR, ensure_workspace_dirs
 
 DEFAULT_SHEET_NAME = "AIR_RATES_ENRICHED"
+RATE_CARD_SHEET_PREFIX = "AIR_RATES_ENRICHED"
 EXCEL_SUFFIXES = {".xlsx", ".xls", ".xlsm"}
 
 COST_NAME_ROW = 1
@@ -537,6 +538,53 @@ def build_matrix_from_rate_card(
     )
 
 
+def build_matrix_data_from_rate_card(
+    rate_card: pd.DataFrame,
+    *,
+    sheet_name: str = "Matrix",
+):
+    from matrix_io import MatrixColumn, MatrixLane, MatrixWorkbookData
+
+    cost_blocks = discover_cost_blocks(list(rate_card.columns))
+    cost_blocks = [block for block in cost_blocks if _cost_block_has_data(block, rate_card)]
+
+    if not cost_blocks:
+        raise ValueError("No cost blocks with data found in rate card.")
+
+    zone_resolver = OriginPostalCodeZoneResolver(rate_card)
+    matrix_rows = _build_matrix_rows(
+        rate_card,
+        SHIPMENT_COLUMNS,
+        cost_blocks,
+        zone_resolver=zone_resolver,
+    )
+
+    header_rows = matrix_rows[:COLUMN_HEADER_ROW]
+    columns: list[MatrixColumn] = []
+    for index, header in enumerate(header_rows[COLUMN_HEADER_ROW - 1]):
+        cost_name = _cell_text(header_rows[COST_NAME_ROW - 1][index]) or None
+        columns.append(
+            MatrixColumn(
+                index=index,
+                header=_cell_text(header),
+                cost_name=cost_name,
+            )
+        )
+
+    lanes: list[MatrixLane] = []
+    for row_values in matrix_rows[DATA_START_ROW - 1:]:
+        lanes.append(MatrixLane(values=list(row_values)))
+
+    return MatrixWorkbookData(
+        sheet_name=sheet_name[:31],
+        columns=columns,
+        header_rows=[list(row) for row in header_rows],
+        lanes=lanes,
+        header_row=COLUMN_HEADER_ROW,
+        data_start_row=DATA_START_ROW,
+    )
+
+
 def load_processing_sheet(
     processing_file: Path,
     sheet_name: str,
@@ -548,25 +596,83 @@ def load_processing_sheet(
     return normalize_dataframe_numbers(df)
 
 
+def resolve_rate_card_sheet_name(
+    sheet_names: list[str],
+    *,
+    preferred: str | None = None,
+) -> str:
+    preferred = preferred or DEFAULT_SHEET_NAME
+    if preferred in sheet_names:
+        return preferred
+
+    candidates = [
+        name
+        for name in sheet_names
+        if name.startswith(RATE_CARD_SHEET_PREFIX)
+        and name != DELIVERY_CHARGES_SHEET
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(
+            f"Multiple rate card sheets found in workbook: {', '.join(candidates)}. "
+            "Convert a single carrier tab or specify the sheet name."
+        )
+
+    raise ValueError(
+        f"Sheet '{preferred}' not found. Available: {', '.join(sheet_names)}"
+    )
+
+
+def _normalize_sheet_carrier_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", name).upper()
+
+
+def resolve_carrier_workbook_sheet(sheet_names: list[str], carrier: str) -> str:
+    carrier = carrier.upper()
+    enriched = f"{RATE_CARD_SHEET_PREFIX}_{carrier}"
+    if enriched in sheet_names:
+        return enriched
+
+    carrier_aliases = {
+        "DHL": {"DHL"},
+        "KN": {"KN", "KANDN"},
+    }
+    acceptable = carrier_aliases.get(carrier, {carrier})
+    matches = [
+        name
+        for name in sheet_names
+        if _normalize_sheet_carrier_name(name) in acceptable
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple carrier tabs found for {carrier}: {', '.join(matches)}. "
+            "Convert a single carrier tab."
+        )
+
+    return resolve_rate_card_sheet_name(sheet_names, preferred=enriched)
+
+
 def load_rate_card_from_processing(
     processing_file: Path,
     *,
-    sheet_name: str = DEFAULT_SHEET_NAME,
+    sheet_name: str | None = None,
 ) -> pd.DataFrame:
     workbook = pd.ExcelFile(processing_file)
-    if sheet_name not in workbook.sheet_names:
-        raise ValueError(
-            f"Sheet '{sheet_name}' not found in {processing_file.name}. "
-            f"Available: {', '.join(workbook.sheet_names)}"
-        )
-    return pd.read_excel(processing_file, sheet_name=sheet_name)
+    resolved_sheet = resolve_rate_card_sheet_name(
+        workbook.sheet_names,
+        preferred=sheet_name,
+    )
+    return pd.read_excel(processing_file, sheet_name=resolved_sheet)
 
 
 def run_build_matrix(
     *,
     auto: bool = False,
     processing_file: Path | None = None,
-    sheet_name: str = DEFAULT_SHEET_NAME,
+    sheet_name: str | None = None,
     output_path: Path | None = None,
 ) -> MatrixBuildResult:
     ensure_workspace_dirs()
@@ -582,8 +688,13 @@ def run_build_matrix(
     if not selected_file.exists():
         raise FileNotFoundError(f"Processing file not found: {selected_file}")
 
-    print(f"\nLoading '{sheet_name}' from {selected_file.name}...")
-    rate_card = load_rate_card_from_processing(selected_file, sheet_name=sheet_name)
+    workbook = pd.ExcelFile(selected_file)
+    resolved_sheet = resolve_rate_card_sheet_name(
+        workbook.sheet_names,
+        preferred=sheet_name,
+    )
+    print(f"\nLoading '{resolved_sheet}' from {selected_file.name}...")
+    rate_card = load_rate_card_from_processing(selected_file, sheet_name=resolved_sheet)
     print(f"  {len(rate_card)} rows, {len(rate_card.columns)} columns")
 
     delivery_charges = load_processing_sheet(selected_file, DELIVERY_CHARGES_SHEET)
