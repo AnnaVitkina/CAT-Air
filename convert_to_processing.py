@@ -69,9 +69,9 @@ def _drop_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[:, keep_columns].copy()
 
 
-def sheet_to_df(file_path: Path, sheet_name: str) -> pd.DataFrame:
-    """Read one sheet with the first row as column headers."""
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=0)
+def sheet_to_df(file_path: Path, sheet_name: str, *, header_row: int = 0) -> pd.DataFrame:
+    """Read one sheet using the given row as column headers."""
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
     df = _drop_empty_rows(df)
     df = _drop_empty_columns(df)
     df = normalize_dataframe_numbers(df)
@@ -168,11 +168,13 @@ def select_sheets(file_path: Path, sheet_names: list[str], *, auto: bool) -> lis
 def convert_workbook_to_dataframes(
     file_path: Path,
     sheet_names: list[str],
+    *,
+    header_row: int = 0,
 ) -> dict[str, pd.DataFrame]:
     sheets: dict[str, pd.DataFrame] = {}
     for sheet_name in sheet_names:
         print(f"  Loading '{sheet_name}'...")
-        df = sheet_to_df(file_path, sheet_name)
+        df = sheet_to_df(file_path, sheet_name, header_row=header_row)
         print(f"    {len(df)} rows, {len(df.columns)} columns")
         sheets[sheet_name] = df
     return sheets
